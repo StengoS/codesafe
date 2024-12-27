@@ -55,7 +55,7 @@ COPY . .
 
 RUN find /opt/pwn.college/dojo -type f -exec ln -s {} /usr/bin/ \;
 
-EXPOSE 22
+EXPOSE 4040
 EXPOSE 80
 EXPOSE 443
 CMD ["dojo", "init"]

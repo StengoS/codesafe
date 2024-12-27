@@ -228,7 +228,7 @@ services:
       - MAC_KEY_FILE=${MAC_KEY_FILE}
       - MAC_GUEST_CONTROL_FILE=${MAC_GUEST_CONTROL_FILE}
     ports:
-      - "22:22"
+      - "4040:4040"
 
   nginx-proxy:
     container_name: nginx-proxy

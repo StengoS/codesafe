@@ -21,6 +21,6 @@ WORKDIR /opt/sshd
 COPY . .
 RUN chmod 700 /opt/sshd/auth.py
 
-EXPOSE 22
+EXPOSE 4040
 
 ENTRYPOINT ["/opt/sshd/start.sh"]
