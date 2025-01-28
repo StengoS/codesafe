@@ -44,16 +44,22 @@ def grade(dojo, users_query, *, ignore_pending=False):
         users_query = Users.query.filter_by(id=users_query.id)
 
     now = datetime.datetime.now(datetime.timezone.utc)
+
+    students = {student.user_id: student.token for student in dojo.students}
+    def get_student_value(student_mapping, user_id, default=None):
+        return (student_mapping or {}).get(students[user_id], default) if user_id in students else default
+
     assessments = dojo.course.get("assessments") or []
 
+    student_to_user = {student.token: student.user_id for student in dojo.students}
     assessment_dates = collections.defaultdict(lambda: collections.defaultdict(dict))
     for assessment in assessments:
         if assessment["type"] not in ["checkpoint", "due"]:
             continue
         assessment_dates[assessment["id"]][assessment["type"]] = (
-            datetime.datetime.fromisoformat(assessment["date"]).astimezone(datetime.timezone.utc),
-            datetime.datetime.fromisoformat(assessment.get("extra_late_date","3000-01-01T16:59:59-07:00")).astimezone(datetime.timezone.utc),
-            assessment.get("extensions") or {},
+            datetime.datetime.fromisoformat(assessment["date"]).astimezone(datetime.timezone.utc) + datetime.timedelta(hours=assessment.get("grace_period", 0)),
+            datetime.datetime.fromisoformat(assessment.get("extra_late_date", "3000-01-01T16:59:59-07:00")).astimezone(datetime.timezone.utc) + datetime.timedelta(hours=assessment.get("grace_period", 0)),
+            {student_to_user[student_id]: extension for student_id, extension in (assessment.get("extensions") or {}).items() if student_id in student_to_user},
         )
 
     def dated_count(label, date_type):
@@ -64,21 +70,34 @@ def grade(dojo, users_query, *, ignore_pending=False):
                 if date_type not in assessment_dates[module_id]:
                     return None
                 date, extra_late_date, extensions = assessment_dates[module_id][date_type]
+
+                # if dojo creator made a mistake and date comes after extra late date then fast forward extra late date to due date + 1 otherwise it will double count the solve
+                if date > extra_late_date:
+                    extra_late_date = date + datetime.timedelta(milliseconds=1)
+
                 if label == "extra_late_solves":
                     if extra_late_date is None:
                         return False
                     date = extra_late_date
-                user_date = db.case(
+
+                extension_adjusted_date = db.case(
                     [(Solves.user_id == int(user_id), date + datetime.timedelta(days=days))
                      for user_id, days in extensions.items()],
                     else_=date
                 ) if extensions else date
-                if label == "late_solves":
 
-                    return and_(Solves.date >= user_date, Solves.date < extra_late_date)
+                extension_adj_extra_late_date = db.case(
+                    [(Solves.user_id == int(user_id), extra_late_date + datetime.timedelta(days=days))
+                     for user_id, days in extensions.items()],
+                    else_=extra_late_date
+                ) if extensions else extra_late_date
+
+                if label == "late_solves":
+                    return and_(Solves.date >= extension_adjusted_date, Solves.date < extension_adj_extra_late_date) # after due date but before adjusted extra late date
                 elif label == "extra_late_solves":
-                    return Solves.date >= user_date
-                return Solves.date < user_date
+                    return Solves.date >= extension_adj_extra_late_date  # after extra late date
+                else:
+                    return Solves.date < extension_adjusted_date  # before due date
         return db.func.sum(
             db.case([(DojoModules.id == module_id, cast(query(module_id), db.Integer))
                      for module_id in assessment_dates] +
@@ -193,7 +212,7 @@ def grade(dojo, users_query, *, ignore_pending=False):
         @limit_extra
         def get_extra(user_id):
             credit = assessment.get("credit", 0.0)
-            return credit.get(str(user_id), 0.0) if isinstance(credit, dict) else credit
+            return get_student_value(credit, user_id, 0.0) if isinstance(credit, dict) else credit
 
         for assessment in assessments:
             type = assessment.get("type")
@@ -208,7 +227,7 @@ def grade(dojo, users_query, *, ignore_pending=False):
                 module_id = assessment["id"]
                 weight = assessment["weight"]
                 percent_required = assessment.get("percent_required", 0.334)
-                extension = (assessment.get("extensions") or {}).get(str(user_id), 0)
+                extension = get_student_value(assessment.get("extensions"), user_id, 0)
 
                 challenge_count = challenge_counts[module_id]
                 checkpoint_solves, due_solves, late_solves, extra_late_solves, all_solves = module_solves.get(module_id, (0, 0, 0, 0, 0))
@@ -231,8 +250,8 @@ def grade(dojo, users_query, *, ignore_pending=False):
 
                 extra_late_penalty = assessment.get("extra_late_penalty", 0.0)
 
-                extension = (assessment.get("extensions") or {}).get(str(user_id), 0)
-                override = (assessment.get("overrides") or {}).get(str(user_id), None)
+                extension = get_student_value(assessment.get("extensions"), user_id, 0)
+                override = get_student_value(assessment.get("overrides"), user_id)
 
                 challenge_count = challenge_counts[module_id]
                 checkpoint_solves, due_solves, late_solves, extra_late_solves, all_solves = module_solves.get(module_id, (0, 0, 0, 0, 0))
@@ -254,9 +273,10 @@ def grade(dojo, users_query, *, ignore_pending=False):
                 elif late_solves and not extra_late_solves:
                     progress = f"{due_solves} (+{late_solves}) / {challenge_count_required}"
                 elif not late_solves and extra_late_solves:
-                    progress = f"{due_solves} (+{extra_late_solves}) / {challenge_count_required}"
+                    progress = f"{due_solves} (+0,+{extra_late_solves}) / {challenge_count_required}"
                 else:
-                    progress = f"{due_solves} (+{late_solves}) (+{extra_late_solves}) / {challenge_count_required}"
+                    progress = f"{due_solves} (+{late_solves},+{extra_late_solves}) / {challenge_count_required}"
+
                 if override is None:
                     late_points = late_value * capped_late_solves
                     extra_late_points = extra_late_value * capped_extra_late_solves
@@ -279,14 +299,14 @@ def grade(dojo, users_query, *, ignore_pending=False):
                 assessment_grades.append(dict(
                     name=assessment_name(dojo, assessment),
                     weight=assessment["weight"],
-                    progress=(assessment.get("progress") or {}).get(str(user_id), ""),
-                    credit=(assessment.get("credit") or {}).get(str(user_id), 0.0),
+                    progress=get_student_value(assessment.get("progress"), user_id, ""),
+                    credit=get_student_value(assessment.get("credit"), user_id, 0.0),
                 ))
 
             if type == "extra":
                 assessment_grades.append(dict(
                     name=assessment_name(dojo, assessment),
-                    progress=(assessment.get("progress") or {}).get(str(user_id), ""),
+                    progress=get_student_value(assessment.get("progress"), user_id, ""),
                     credit=get_extra(user_id)
                 ))
 
@@ -524,7 +544,7 @@ def download_all_grades(dojo):
             .query
             .join(DojoStudents, DojoStudents.user_id == Users.id)
             .filter(DojoStudents.dojo == dojo,
-                    DojoStudents.token.in_(dojo.course.get("students") or []))
+                    DojoStudents.token.in_(course_students))
         )
         grades = sorted(grade(dojo, users, ignore_pending=ignore_pending),
                         key=lambda grade: grade["overall_grade"],

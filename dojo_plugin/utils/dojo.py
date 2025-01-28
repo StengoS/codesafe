@@ -21,6 +21,8 @@ from ..models import Dojos, DojoUsers, DojoModules, DojoChallenges, DojoResource
 from ..config import DOJOS_DIR
 from ..utils import get_current_container
 
+DOJOS_TMP_DIR = DOJOS_DIR/"tmp"
+DOJOS_TMP_DIR.mkdir(exist_ok=True)
 
 ID_REGEX = Regex(r"^[a-z0-9-]{1,32}$")
 UNIQUE_ID_REGEX = Regex(r"^[a-z0-9-~]{1,128}$")
@@ -63,6 +65,8 @@ DOJO_SPEC = Schema({
         "dojo": UNIQUE_ID_REGEX,
     },
 
+    Optional("auxiliary", default={}, ignore_extra_keys=True): dict,
+
     Optional("modules", default=[]): [{
         **ID_NAME_DESCRIPTION,
         **VISIBILITY,
@@ -83,6 +87,7 @@ DOJO_SPEC = Schema({
             Optional("image"): IMAGE_REGEX,
             Optional("allow_privileged"): bool,
             Optional("importable"): bool,
+            Optional("auxiliary", default={}, ignore_extra_keys=True): dict,
             # Optional("path"): Regex(r"^[^\s\.\/][^\s\.]{,255}$"),
 
             Optional("import"): {
@@ -114,6 +119,8 @@ DOJO_SPEC = Schema({
                 **VISIBILITY,
             },
         )],
+
+        Optional("auxiliary", default={}, ignore_extra_keys=True): dict,
     }],
     Optional("pages", default=[]): [str],
     Optional("files", default=[]): [Or(
@@ -399,16 +406,14 @@ def generate_ssh_keypair():
     return (public_key.read_text().strip(), private_key.read_text())
 
 def dojo_yml_dir(spec):
-    tmp_dojos_dir = DOJOS_DIR / "tmp"
-    tmp_dojos_dir.mkdir(exist_ok=True)
-    yml_dir = tempfile.TemporaryDirectory(dir=tmp_dojos_dir)    # TODO: ignore_cleanup_errors=True
+    yml_dir = tempfile.TemporaryDirectory(dir=DOJOS_TMP_DIR)    # TODO: ignore_cleanup_errors=True
     yml_dir_path = pathlib.Path(yml_dir.name)
     with open(yml_dir_path / "dojo.yml", "w") as do:
         do.write(spec)
     return yml_dir
 
 def dojo_clone(repository, private_key):
-    tmp_dojos_dir = DOJOS_DIR / "tmp"
+    tmp_dojos_dir = DOJOS_TMP_DIR
     tmp_dojos_dir.mkdir(exist_ok=True)
     clone_dir = tempfile.TemporaryDirectory(dir=tmp_dojos_dir)  # TODO: ignore_cleanup_errors=True
 
@@ -419,7 +424,7 @@ def dojo_clone(repository, private_key):
     url = f"https://github.com/{repository}"
     if requests.head(url).status_code != 200:
         url = f"git@github.com:{repository}"
-    subprocess.run(["git", "clone", "--recurse-submodules", url, clone_dir.name],
+    subprocess.run(["git", "clone", "--depth=1", "--recurse-submodules", url, clone_dir.name],
                    env={
                        "GIT_SSH_COMMAND": f"ssh -i {key_file.name}",
                        "GIT_TERMINAL_PROMPT": "0",

@@ -2,7 +2,6 @@
 
 let
   pythonEnv = pkgs.python3.withPackages (ps: with ps; [
-    angr
     asteval
     flask
     ipython
@@ -10,6 +9,7 @@ let
     psutil
     pwntools
     pycryptodome
+    pyroute2
     r2pipe
     requests
     ropper
@@ -46,8 +46,10 @@ in
     # TODO: binary-ninja
 
     wireshark
+    termshark
     nmap
     tcpdump
+    nftables
     firefox
     geckodriver
     burpsuite
