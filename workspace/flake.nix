@@ -62,6 +62,8 @@
             wget
             which
 
+            ruff
+
             (lib.hiPrio ldd)
 
             init
