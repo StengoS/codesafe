@@ -102,7 +102,7 @@ for config_option in missing_errors:
         raise RuntimeError(f"Configuration Error: {config_option} must be set in the environment")
 
 def bootstrap():
-    set_config("ctf_name", "pwn.college")
+    set_config("ctf_name", "Codesafe")
     set_config("ctf_description", "pwn.college")
     set_config("user_mode", "users")
 
