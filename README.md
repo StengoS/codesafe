@@ -8,7 +8,6 @@ All credit for the DOJO infrastructure and the conceptualization behind it goes 
 "Greetz" section of the website and to all those listed as contributors on their repos. pwn.college is maintained 
 by a team of faculty and students at Arizona State University and used primarily in their cybersecurity courses. 
 All of their course materials and corresponding challenges are available on [pwn.college](https://pwn.college), so go check it out for hands-on cybersecurity and hacking!
-- Steven Ngo
 
 For more information on the DOJO infrastructure, please check out our [Documentation](./docs):
 - [📜 History](./docs/history.md)
