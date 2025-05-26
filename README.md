@@ -1,6 +1,11 @@
 # Codesafe
 [Codesafe description to be added.]
 
+### Current Set-Up
+If you are attempting to deploy Codesafe yourself directly from this repo, there are some hard-coded values in the code that are customized for my test deployment of Codesafe on a DigitalOcean droplet + configured to also have a named domain with HTTPS. Here are where the values are hard-coded:
+- SSH port 22 for the main Docker container is set to be 4040, see [this commit](https://github.com/StengoS/codesafe/commit/09fb7e307db90ef162c8ab14a37842bc7e3ece68).
+- HTTPS configuration, see dojo/dojo-init and 
+
 
 ### Shout-Outs to ASU's pwn.college
 Codesafe is currently powered by pwn.college's DOJO infrastructure, which you can best experience at [pwn.college](https://pwn.college). 
