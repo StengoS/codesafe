@@ -3,3 +3,6 @@
 opt/
 sensai/
 data/
+
+# Custom
+*.prompt
