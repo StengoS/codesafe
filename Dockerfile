@@ -4,6 +4,11 @@ FROM ubuntu:24.04
 
 SHELL ["/bin/bash", "-ceox", "pipefail"]
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential bc flex bison libssl-dev libelf-dev dwarves \
+      curl ca-certificates yq \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LC_CTYPE=C.UTF-8
 
@@ -21,13 +26,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         iputils-ping
         jq
         kmod
+        python3-requests
         unzip
         wget
         wireguard
 EOF
 
 RUN <<EOF
-curl -fsSL https://get.docker.com | /bin/sh
+curl -fsSL https://get.docker.com | VERSION=27.5.1 sh
 sed -i 's|-H fd:// ||' /lib/systemd/system/docker.service
 EOF
 
@@ -43,7 +49,7 @@ COPY <<EOF /etc/docker/daemon.json
 }
 EOF
 
-ADD https://raw.githubusercontent.com/moby/moby/master/profiles/seccomp/default.json /etc/docker/seccomp.json
+ADD https://raw.githubusercontent.com/moby/profiles/master/seccomp/default.json /etc/docker/seccomp.json
 
 RUN <<EOF
 cd /tmp
@@ -56,11 +62,14 @@ EOF
 ADD https://github.com/CTFd/CTFd.git#3.6.0 /opt/CTFd
 
 COPY <<EOF /etc/fstab
+shm /dev/shm tmpfs defaults,nosuid,nodev,noexec,size=50% 0 0
 tmpfs /run/dojofs tmpfs defaults,mode=755,shared 0 0
 /data/homes /run/homefs none defaults,bind,nosuid 0 0
 EOF
 
 COPY <<EOF /etc/sysctl.d/90-dojo.conf
+fs.inotify.max_user_instances = 8192
+fs.inotify.max_user_watches = 1048576
 kernel.pty.max = 1048576
 kernel.core_pattern = core
 kernel.apparmor_restrict_unprivileged_userns = 0
