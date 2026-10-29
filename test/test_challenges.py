@@ -1,0 +1,271 @@
+import subprocess
+import json
+import re
+import uuid
+from urllib.parse import parse_qs, quote, urlencode, urlparse
+
+import pytest
+import yaml
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+from utils import (
+    DOJO_URL,
+    create_dojo_yml,
+    dojo_run,
+    get_outer_container_for,
+    get_user_id,
+    start_challenge,
+    suppress_award_popup,
+    workspace_run,
+)
+
+
+def test_start_challenge_failure_debug(admin_session, guest_dojo_admin, random_user_session):
+    dojo_admin_name, dojo_admin_session = guest_dojo_admin
+    dojo = create_dojo_yml(f"""
+id: docker-failure-{dojo_admin_name}
+type: public
+image: pwncollege/challenge-simple
+modules:
+  - id: test
+    challenges:
+      - id: test
+files:
+  - type: text
+    path: test/test/.init
+    content: |
+      #!/bin/sh
+      printf '%20000s\\n' x
+      echo init-stdout
+      echo init-stderr >&2
+      exit 1
+""", session=admin_session)
+
+    assert dojo_admin_session.get(f"{DOJO_URL}/dojo/{dojo}/join/").status_code == 200
+    response = admin_session.post(
+        f"{DOJO_URL}/pwncollege_api/v1/dojos/{dojo}/admins/promote",
+        json={"user_id": get_user_id(dojo_admin_name)},
+    )
+    assert response.status_code == 200
+
+    start_data = {"dojo": dojo, "module": "test", "challenge": "test", "practice": False}
+    response = dojo_admin_session.post(f"{DOJO_URL}/pwncollege_api/v1/docker", json=start_data)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["success"] is False
+    assert result["error"] == "Docker failed"
+    assert result["debug"]["trace_id"]
+    assert [attempt["attempt"] for attempt in result["debug"]["attempts"]] == [1, 2, 3]
+    for attempt in result["debug"]["attempts"]:
+        assert attempt["type"] == "WorkspaceInitializationError"
+        assert attempt["message"] == "DOJO_INIT_FAILED: Challenge initialization error."
+        assert "init-stdout" in attempt["output"]
+        assert "init-stderr" in attempt["output"]
+        assert len(attempt["output"].encode()) <= 16 * 1024
+
+    response = random_user_session.post(f"{DOJO_URL}/pwncollege_api/v1/docker", json=start_data)
+    assert response.status_code == 200
+    assert response.json() == {"success": False, "error": "Docker failed"}
+
+
+def test_start_challenge_error_renders_as_user_as_text(browser_fixture, example_dojo):
+    payload = "<img src=x onerror=window.__challengeStartXss=true>"
+    expected_error = f"Invalid user ID ({payload})"
+
+    suppress_award_popup(browser_fixture)
+    browser_fixture.get(f"{DOJO_URL}/login")
+    browser_fixture.find_element(By.ID, "name").send_keys("admin")
+    browser_fixture.find_element(By.ID, "password").send_keys("admin")
+    browser_fixture.find_element(By.ID, "_submit").click()
+    browser_fixture.get(f"{DOJO_URL}/{example_dojo}/hello?as_user={quote(payload)}")
+    browser_fixture.execute_script("window.__challengeStartXss = false")
+    browser_fixture.find_element(By.ID, "challenges-header-button-2").click()
+    challenge_body = browser_fixture.find_element(By.ID, "challenges-body-2")
+    start_button = challenge_body.find_element(By.ID, "challenge-start")
+    WebDriverWait(browser_fixture, 10).until(lambda _: start_button.is_displayed() and start_button.is_enabled())
+    browser_fixture.execute_script("arguments[0].scrollIntoView({block: 'center'})", start_button)
+    WebDriverWait(browser_fixture, 10).until(lambda _: browser_fixture.execute_script(
+        "var rect = arguments[0].getBoundingClientRect();"
+        "var top = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);"
+        "return top === arguments[0] || arguments[0].contains(top);", start_button))
+    start_button.click()
+
+    result_message = challenge_body.find_element(By.ID, "result-message")
+    WebDriverWait(browser_fixture, 10).until(
+        lambda _: result_message.find_element(By.TAG_NAME, "code").text == expected_error
+    )
+    assert result_message.find_element(By.TAG_NAME, "code").text == expected_error
+    assert not result_message.find_elements(By.TAG_NAME, "img")
+    assert not browser_fixture.execute_script("return window.__challengeStartXss")
+
+
+def test_active_module_endpoint(random_user_session, example_dojo):
+    start_challenge(example_dojo, "hello", "banana", session=random_user_session)
+    response = random_user_session.get(f"{DOJO_URL}/active-module")
+    assert response.status_code == 200
+
+    current = response.json()["c_current"]
+    assert current["challenge_reference_id"] == "banana"
+    assert current["dojo_reference_id"] == "example"
+    assert current["module_id"] == "hello"
+    assert response.json()["c_previous"]["challenge_reference_id"] == "apple"
+    assert response.json()["c_next"] == {}
+
+    start_challenge(example_dojo, "hello", "apple", session=random_user_session)
+    response = random_user_session.get(f"{DOJO_URL}/active-module")
+    assert response.status_code == 200
+    assert response.json()["c_current"]["challenge_reference_id"] == "apple"
+    assert response.json()["c_next"]["challenge_reference_id"] == "banana"
+    assert response.json()["c_previous"] == {}
+
+
+def test_challenge_access_code(admin_session, random_user_session, example_dojo):
+    code = "exam & café/+"
+    dojo = create_dojo_yml(yaml.safe_dump({
+        "id": f"access-code-{uuid.uuid4().hex[:8]}", "type": "public", "access_code": code,
+        "modules": [{"id": "hello", "challenges": [{
+            "id": "protected", "name": "Protected challenge",
+            "import": {"dojo": example_dojo, "module": "hello", "challenge": "apple"},
+        }]}],
+    }), session=admin_session)
+    data = {"dojo": dojo, "module": "hello", "challenge": "protected"}
+    start_challenge(example_dojo, "hello", "apple", session=random_user_session)
+
+    for supplied, error in [(None, "This challenge requires an access code"),
+                            ("wrong", "Invalid challenge access code")]:
+        module = random_user_session.get(f"{DOJO_URL}/{dojo}/hello", params={"access_code": supplied})
+        assert module.status_code == 200 and "Protected challenge" in module.text
+        workspace = random_user_session.get(f"{DOJO_URL}/workspace/terminal", params={**data, "access_code": supplied})
+        assert workspace.status_code == 403 and error in workspace.text
+        for practice in (False, True):
+            response = random_user_session.post(f"{DOJO_URL}/pwncollege_api/v1/docker",
+                                                json={**data, "practice": practice, "access_code": supplied})
+            assert response.status_code == 200
+            assert response.json() == {"success": False, "error": error}
+        current = random_user_session.get(f"{DOJO_URL}/pwncollege_api/v1/docker").json()
+        assert current["dojo"] == example_dojo and current["challenge"] == "apple"
+
+    workspace = random_user_session.get(f"{DOJO_URL}/workspace/terminal",
+                                        params={**data, "access_code": code, "fullscreen": "true"})
+    assert workspace.status_code == 200
+    redirect = json.loads(re.search(r"window.location.replace\((.+)\);", workspace.text).group(1))
+    assert urlparse(redirect).path == "/workspace/terminal"
+    assert parse_qs(urlparse(redirect).query) == {"fullscreen": ["true"], "access_code": [code]}
+    for practice in (False, True):
+        response = random_user_session.post(f"{DOJO_URL}/pwncollege_api/v1/docker",
+                                            json={**data, "practice": practice, "access_code": code})
+        assert response.json()["success"]
+    response = admin_session.post(f"{DOJO_URL}/pwncollege_api/v1/docker", json=data)
+    assert response.json()["success"]
+
+
+def test_workspace_auto_start_without_home_mount(
+    random_user_name, random_user_session, random_user_browser, example_dojo
+):
+    query = urlencode({
+        "dojo": example_dojo,
+        "module": "hello",
+        "challenge": "apple",
+        "home": "false",
+        "fullscreen": "true",
+    })
+    random_user_browser.get(f"{DOJO_URL}/workspace/terminal?{query}")
+
+    WebDriverWait(random_user_browser, 60).until(
+        lambda browser: browser.current_url.endswith("/workspace/terminal?fullscreen=true")
+    )
+    navbar = random_user_browser.find_element(By.CLASS_NAME, "navbar")
+    fullscreen_icon = random_user_browser.find_element(By.CSS_SELECTOR, "#fullscreen i")
+    WebDriverWait(random_user_browser, 30).until(
+        lambda _: "navbar-hidden" in navbar.get_attribute("class")
+        and "fa-compress" in fullscreen_icon.get_attribute("class")
+    )
+    workspace_iframe = random_user_browser.find_element(By.ID, "workspace-iframe")
+    terminal_button = random_user_browser.find_element(
+        By.CSS_SELECTOR, '.workspace-service[data-service="terminal: 7681"]'
+    )
+    WebDriverWait(random_user_browser, 30).until(
+        lambda browser: "active" in terminal_button.get_attribute("class")
+    )
+    WebDriverWait(random_user_browser, 30).until(
+        lambda browser: "/7681/" in (workspace_iframe.get_attribute("src") or "")
+    )
+
+    workspace_run("test -d /home/hacker", user=random_user_name)
+    with pytest.raises(subprocess.CalledProcessError):
+        workspace_run("findmnt --mountpoint /home/hacker", user=random_user_name)
+
+    workspace_run("touch /home/hacker/ephemeral", user=random_user_name)
+    start_challenge(example_dojo, "hello", "apple", session=random_user_session, home=False)
+    workspace_run("test ! -e /home/hacker/ephemeral", user=random_user_name)
+
+
+@pytest.mark.parametrize("home", [False, True])
+def test_workspace_restart_preserves_home_mount(
+    random_user_name, random_user_session, random_user_browser, example_dojo, home
+):
+    start_challenge(example_dojo, "hello", "apple", session=random_user_session, home=home)
+    workspace_run("touch /tmp/restart-marker /home/hacker/restart-marker", user=random_user_name)
+    random_user_browser.get(f"{DOJO_URL}/workspace/terminal")
+    wait = WebDriverWait(random_user_browser, 60)
+    restart = wait.until(EC.element_to_be_clickable((By.ID, "challenge-restart")))
+    restart.click()
+    wait.until(lambda _: restart.is_enabled())
+
+    def check_home(practice):
+        state = random_user_session.get(f"{DOJO_URL}/pwncollege_api/v1/docker").json()
+        assert state["success"]
+        assert state["home"] is home
+        assert state["practice"] is practice
+        if home:
+            workspace_run("findmnt --mountpoint /home/hacker", user=random_user_name)
+        else:
+            with pytest.raises(subprocess.CalledProcessError):
+                workspace_run("findmnt --mountpoint /home/hacker", user=random_user_name)
+
+    check_home(practice=False)
+    workspace_run("test ! -e /tmp/restart-marker", user=random_user_name)
+    workspace_run(
+        "test -e /home/hacker/restart-marker" if home else "test ! -e /home/hacker/restart-marker",
+        user=random_user_name,
+    )
+
+    checkbox = random_user_browser.find_element(By.CSS_SELECTOR, "#workspace-change-privilege input")
+    checkbox.click()
+    wait.until(EC.alert_is_present())
+    random_user_browser.switch_to.alert.accept()
+    wait.until(lambda _: checkbox.is_enabled())
+    check_home(practice=True)
+
+
+def test_workspace_home_option_ignores_image_volume(
+    random_user_name, random_user_session, example_dojo
+):
+    start_challenge(example_dojo, "hello", "apple", session=random_user_session, home=False)
+    container = f"user_{get_user_id(random_user_name)}"
+    outer = get_outer_container_for(container)
+    image = "pwncollege/test-home-volume"
+    dojo_run(
+        "docker", "build", "-t", image, "-", container=outer,
+        input="FROM pwncollege/challenge-simple\nVOLUME /home/hacker\n",
+    )
+    dojo_run("docker", "rm", "-f", container, container=outer)
+    try:
+        dojo_run(
+            "docker", "create", "--name", container,
+            "--label", f"dojo.dojo_id={example_dojo}",
+            "--label", "dojo.module_id=hello",
+            "--label", "dojo.challenge_id=apple",
+            "--label", "dojo.mode=standard",
+            image, container=outer,
+        )
+        mounts = json.loads(dojo_run("docker", "inspect", container, container=outer).stdout)[0]["Mounts"]
+        assert any(mount["Destination"] == "/home/hacker" and mount["Driver"] == "local" for mount in mounts)
+        response = random_user_session.get(f"{DOJO_URL}/pwncollege_api/v1/docker")
+        assert response.status_code == 200
+        assert response.json()["success"]
+        assert response.json()["home"] is False
+    finally:
+        dojo_run("docker", "rm", "-fv", container, container=outer)

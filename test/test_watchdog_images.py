@@ -1,0 +1,238 @@
+from threading import Barrier
+from unittest.mock import MagicMock, Mock, call
+
+import docker
+import pytest
+from requests import Response
+from requests.exceptions import ConnectionError, ReadTimeout
+
+from watchdog import docker_prune_images as prune
+
+
+ID = "sha256:" + "a" * 64
+OTHER_ID = "sha256:" + "b" * 64
+DIGEST = "sha256:" + "c" * 64
+
+
+@pytest.mark.parametrize("reference,expected", [
+    ("example/course", "docker.io/example/course:latest"),
+    ("example/course:latest", "docker.io/example/course:latest"),
+    ("index.docker.io/example/course", "docker.io/example/course:latest"),
+    ("registry-1.docker.io/example/course", "registry-1.docker.io/example/course:latest"),
+    ("ubuntu", "docker.io/library/ubuntu:latest"),
+    ("docker.io/ubuntu", "docker.io/library/ubuntu:latest"),
+    ("registry.example:5000/course:V2", "registry.example:5000/course:V2"),
+    ("example/course:old@" + DIGEST, "docker.io/example/course@" + DIGEST),
+    (ID, ID), (ID[7:19], ID[:19]),
+])
+def test_normalization(reference, expected):
+    assert prune.normalize_reference(reference) == expected
+
+
+def image(tags=None, *, image_id=ID, digests=None, labels=None):
+    return {"Id": image_id, "RepoTags": tags or [], "RepoDigests": digests or [], "Labels": labels or {}}
+
+
+def client_for(item):
+    client = Mock()
+    client.api.images.return_value = [item]
+    client.api.containers.return_value = []
+    client.api.inspect_image.return_value = item
+    return client
+
+
+@pytest.mark.parametrize("item,refs,used_ids", [
+    (image(["example/course:latest", "example/old:v1"]), {"example/course"}, set()),
+    (image(digests=["example/course@" + DIGEST]), {"example/course@" + DIGEST}, set()),
+    (image(), {ID[:19]}, set()),
+    (image(), set(), {ID}),
+    (image(labels={"com.docker.compose.project": "dojo"}), set(), set()),
+    (image(labels={"pwn.college.gc.keep": ""}), set(), set()),
+])
+def test_protection(item, refs, used_ids):
+    assert prune.protected(item, {prune.normalize_reference(ref) for ref in refs}, used_ids)
+
+
+@pytest.mark.parametrize("reference", ["pwncollege/dojo:latest", "ubuntu:24.04", "alpine:3.22", "busybox@" + DIGEST])
+def test_base_images_follow_normal_reference_protection(reference):
+    item = image([reference])
+    assert not prune.protected(item, set(), set())
+    assert prune.protected(item, {prune.normalize_reference(reference)}, set())
+    assert prune.protected(item, set(), {ID})
+
+
+def test_db_references_and_default_image():
+    connection = MagicMock()
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [(None,), ("",), ("example/course",), ("mac:desktop",)]
+    assert prune.challenge_references(connection) == {prune.normalize_reference(prune.LEGACY_IMAGE), prune.normalize_reference("example/course")}
+    cursor.execute.assert_called_once_with("SELECT DISTINCT data->'image' FROM dojo_challenges")
+
+
+@pytest.mark.parametrize("rows", [[], [(False,)], [("invalid reference",)]])
+def test_invalid_db_inventory_aborts(rows):
+    connection = MagicMock()
+    connection.cursor.return_value.__enter__.return_value.fetchall.return_value = rows
+    with pytest.raises(ValueError):
+        prune.challenge_references(connection)
+
+
+@pytest.mark.parametrize("tags", [[], ["example/old:v1"], ["example/old:v1", "example/old:v2"]])
+def test_nonforce_removal(tags):
+    client = client_for(image(tags))
+    assert prune.collect_images(client, lambda: set())
+    assert client.api.remove_image.call_args_list == [call(target, force=False, noprune=True) for target in tags or [ID]]
+
+
+def test_stopped_container_preserves_image_and_configured_tag():
+    client = client_for(image(["example/old:v1"]))
+    client.api.images.return_value.append(image(["example/current:latest"], image_id=OTHER_ID))
+    client.api.containers.return_value = [{"ImageID": ID, "Image": "example/current", "State": "exited"}]
+    prune.collect_images(client, lambda: set())
+    client.api.containers.assert_called_with(all=True)
+    client.api.remove_image.assert_not_called()
+
+
+def test_reference_added_between_alias_removals():
+    client = client_for(image(["example/old:v1", "example/old:v2"]))
+    refs = Mock(side_effect=[set(), set(), {prune.normalize_reference("example/old:v2")}])
+    prune.collect_images(client, refs)
+    client.api.remove_image.assert_called_once_with("example/old:v1", force=False, noprune=True)
+
+
+def test_moved_tag_is_skipped():
+    client = client_for(image(["example/old:v1"]))
+    client.api.inspect_image.return_value = image(["example/old:v1"], image_id=OTHER_ID)
+    prune.collect_images(client, lambda: set())
+    client.api.remove_image.assert_not_called()
+
+
+def test_new_container_is_protected():
+    client = client_for(image(["example/old:v1"]))
+    client.api.containers.side_effect = [[], [{"ImageID": ID, "Image": "example/old:v1"}]]
+    prune.collect_images(client, lambda: set())
+    client.api.remove_image.assert_not_called()
+
+
+def test_failed_db_refresh_prevents_deletion():
+    client = client_for(image(["example/old:v1"]))
+    with pytest.raises(RuntimeError):
+        prune.collect_images(client, Mock(side_effect=[set(), RuntimeError("DB unavailable")]))
+    client.api.remove_image.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [404, 409, 500])
+def test_docker_errors_are_not_retried_or_forced(status):
+    client = client_for(image(["example/old:v1"]))
+    client.api.images.return_value.append(image(image_id=OTHER_ID))
+    client.api.inspect_image.side_effect = client.api.images.return_value
+    response = Response()
+    response.status_code = status
+    error_type = docker.errors.NotFound if status == 404 else docker.errors.APIError
+    client.api.remove_image.side_effect = [error_type("failed", response=response), None]
+    assert prune.collect_images(client, lambda: set()) == (status == 404)
+    assert client.api.remove_image.call_args_list == [
+        call(target, force=False, noprune=True) for target in ["example/old:v1", OTHER_ID]
+    ]
+
+
+@pytest.mark.parametrize("error", [ReadTimeout("stuck"), ConnectionError("disconnected")])
+def test_failed_removal_skips_remaining_aliases_and_continues(error, caplog):
+    client = client_for(image(["example/old:v1", "example/old:v2"]))
+    client.api.images.return_value.append(image(image_id=OTHER_ID))
+    client.api.inspect_image.side_effect = client.api.images.return_value
+    client.api.remove_image.side_effect = [error, None]
+    assert not prune.collect_images(client, lambda: set())
+    assert client.api.remove_image.call_args_list == [
+        call(target, force=False, noprune=True) for target in ["example/old:v1", OTHER_ID]
+    ]
+    assert "Docker may still be processing it" in caplog.text
+
+
+@pytest.mark.parametrize("stage", ["images", "containers", "refresh", "inspect"])
+def test_inventory_or_safety_failure_stops_collection(stage):
+    client = client_for(image())
+    error = ReadTimeout("unavailable")
+    if stage == "images":
+        client.api.images.side_effect = error
+    elif stage == "containers":
+        client.api.containers.side_effect = error
+    elif stage == "refresh":
+        client.api.containers.side_effect = [[], error]
+    else:
+        client.api.inspect_image.side_effect = error
+    with pytest.raises(ReadTimeout):
+        prune.collect_images(client, lambda: set())
+    client.api.remove_image.assert_not_called()
+
+
+def test_missing_image_at_inspection_is_skipped():
+    client = client_for(image())
+    client.api.inspect_image.side_effect = docker.errors.NotFound("gone")
+    assert prune.collect_images(client, lambda: set())
+    client.api.remove_image.assert_not_called()
+
+
+def test_overlapping_run_does_not_connect(tmp_path, monkeypatch):
+    path = tmp_path / "prune.lock"
+    monkeypatch.setattr(prune, "LOCK_PATH", str(path))
+    connect = Mock(side_effect=AssertionError("must not connect"))
+    monkeypatch.setattr(prune.psycopg2, "connect", connect)
+    with path.open("a") as lock:
+        prune.fcntl.flock(lock, prune.fcntl.LOCK_EX | prune.fcntl.LOCK_NB)
+        assert prune.main() == 0
+    connect.assert_not_called()
+
+
+@pytest.mark.parametrize("nodes,urls", [
+    ('{}', ["unix:///var/run/docker.sock"]),
+    ('{"1": {}, "2": {}}', ["tcp://192.168.42.2:2375", "tcp://192.168.42.3:2375"]),
+])
+def test_main_uses_direct_read_only_db_connection(tmp_path, monkeypatch, nodes, urls):
+    monkeypatch.setattr(prune, "LOCK_PATH", str(tmp_path / "prune.lock"))
+    monkeypatch.setattr(prune.Path, "read_text", lambda _: nodes)
+    connections = [Mock() for _ in urls]
+    clients = [Mock() for _ in urls]
+    connect = Mock(side_effect=connections)
+    factory = Mock(side_effect=clients)
+    collect = Mock(return_value=True)
+    monkeypatch.setattr(prune.psycopg2, "connect", connect)
+    monkeypatch.setattr(prune.docker, "DockerClient", factory)
+    monkeypatch.setattr(prune, "collect_images", collect)
+    assert prune.main() == 0
+    assert connect.call_args_list == [call(connect_timeout=10, options="-c default_transaction_read_only=on -c statement_timeout=10000")] * len(urls)
+    for connection in connections:
+        assert connection.autocommit is True
+        connection.close.assert_called_once()
+    for client in clients:
+        client.close.assert_called_once()
+    factory.assert_has_calls([call(base_url=url, timeout=3600) for url in urls], any_order=True)
+    assert factory.call_count == len(urls)
+    assert collect.call_count == len(urls)
+
+
+@pytest.mark.parametrize("outcome", [True, False, RuntimeError("inventory failed")])
+def test_node_reports_failures_and_closes_connections(monkeypatch, outcome):
+    connection = Mock()
+    client = Mock()
+    monkeypatch.setattr(prune.psycopg2, "connect", Mock(return_value=connection))
+    monkeypatch.setattr(prune.docker, "DockerClient", Mock(return_value=client))
+    collect = Mock(side_effect=[outcome])
+    monkeypatch.setattr(prune, "collect_images", collect)
+    assert prune.collect_node("tcp://node:2375") == (outcome is True)
+    assert collect.call_count == 1
+    connection.close.assert_called_once()
+    client.close.assert_called_once()
+
+
+def test_nodes_run_in_parallel_and_report_partial_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(prune, "LOCK_PATH", str(tmp_path / "prune.lock"))
+    monkeypatch.setattr(prune.Path, "read_text", lambda _: '{"1": {}, "2": {}}')
+    barrier = Barrier(2, timeout=5)
+    def sweep(url):
+        barrier.wait()
+        return url.endswith(".3:2375")
+    collect = Mock(side_effect=sweep)
+    monkeypatch.setattr(prune, "collect_node", collect)
+    assert prune.main() == 1
+    assert collect.call_count == 2

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+
+{% block stylesheets %}
+{{ super() }}
+
+<style>
+    html, body {
+        margin: 0;
+        height: 100%;
+        min-height: 100%;
+        background-color: var(--background);
+        overflow: hidden;
+    }
+
+    body {
+        display: flex;
+        flex-direction: column;
+    }
+
+    nav, footer {
+        flex: none;
+    }
+
+    main {
+        flex: auto;
+        min-height: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .workspace-iframe {
+        flex: 1;
+        width: 100%;
+        border: none;
+    }
+
+    .challenge-workspace {
+        flex: auto;
+        min-height: 0;
+        display:flex;
+        flex-direction: column;
+    }
+
+    .workspace-ssh {
+        flex: none;
+        margin: 1em;
+    }
+
+    .workspace-description {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 2rem;
+    }
+
+    .challenge-workspace > .workspace-controls {
+        flex: none;
+        margin-top: auto;
+    }
+</style>
+{% endblock %}
+
+
+{% block content %}
+<div class="challenge-workspace" data-initial-service="{{ initial_service or '' }}">
+  <iframe src="" id="workspace-iframe" class="workspace-iframe" name="workspace" allow="clipboard-read *; clipboard-write *"></iframe>
+  <div class="workspace-ssh" style="display: none;">
+    <h3>Connect with SSH</h3>
+    Link your <a href="/settings#ssh-key" target="_blank">SSH key</a>, then connect with: <code>ssh hacker@dojo.pwn.college</code>
+  </div>
+  <div class="workspace-description" style="display: none;">
+    {{ challenge.description | markdown }}
+  </div>
+  {% include "components/actionbar.html" %}
+</div>
+{% endblock %}
+
+
+{% block scripts %}
+<script defer src="{{ url_for('views.themes', path='js/dojo/actionbar.js') }}"></script>
+<script defer src="{{ url_for('views.themes', path='js/dojo/workspace.js') }}"></script>
+{% endblock %}

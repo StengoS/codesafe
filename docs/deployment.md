@@ -37,7 +37,7 @@ This will run the initial setup, including building the challenge docker image.
 > -v "dojo-data-docker:/data/docker"
 > ```
 
-By default, the dojo will initialize itself to listen on and serve from `localhost.pwn.college` (which resolves to 127.0.0.1).
+By default, the dojo will initialize itself to listen on and serve from `localhost.pwn.college` and `workspace.localhost.pwn.college` (which resolve to 127.0.0.1).
 This is fine for development, but to serve your dojo to the world, you will need to update this (see Production Deployment).
 
 It will take some time to initialize everything and build the challenge docker image.
@@ -47,8 +47,8 @@ You can check on your container (and the progress of the initial build) with:
 docker exec dojo dojo logs
 ```
 
-Once things are setup, you should be able to access the dojo and login with username `admin` and password `admin`.
-You can change these admin credentials in the admin panel.
+Once things are set up, you should be able to access the dojo and login with username `admin` and password `admin`.
+You can change these admin credentials on the settings page or with `dojo flask`.
 
 ## Production Deployment
 
@@ -60,6 +60,9 @@ This will switch from the default development settings to production settings, w
 
 In order to change where the host is serving from, you can modify `DOJO_HOST`; for example: `-e DOJO_HOST=example.com`.
 In order for this to work correctly, you must correctly point the domain at the server's IP via DNS.
+
+By default, the `WORKSPACE_HOST` where all workspace content is served from is set to `workspace.$DOJO_HOST`.
+If you would like to change where workspaces are served from you can modify `WORKSPACE_HOST`; for example: `-e WORSKPACE_HOST=helloworskpace.example.com`.
 
 More of these configuration options (and defaults) can be found in [./dojo/dojo-init](./dojo/dojo-init).
 
@@ -78,7 +81,7 @@ This will cause downtime when the dojo is rebuilding.
 
 Some changes _can_ be applied without a complete restart, however _this is not guaranteed_.
 
-If you really know what you're doing (the changes that you're pulling in are just to `ctfd`), inside the `dojo` container you can do the following:
+If you really know what you're doing (the changes that you're pulling in are just to `site/`), inside the `dojo` container you can do the following:
 
 ```sh
 dojo update
@@ -130,24 +133,29 @@ Retrieve configuration data from the main node:
 ```sh
 docker exec -it dojo-main bash
 dojo node show | grep -oP 'WORKSPACE_KEY: \K[A-Za-z0-9+/]+={0,2}'  # This is the WORKSPACE_KEY
+dojo node show | grep -oP 'WORKSPACE_SECRET:\s*\K[0-9a-fA-F]+'     # This is the WORKSPACE_SECRET
 ip -4 addr show eth0 | grep -oP 'inet \K[0-9\.]+'                  # This may be the DOJO_HOST
 ```
 
 The `WORKSPACE_KEY` will be necessary to authenticate workspace nodes with the main node.
-If you already have a `DOJO_HOST` (for example, a publicly accessible IP address), you can use that; otherwise, if you're running multiple nodes on the same host, this IP address (assigned by Docker) will be the `DOJO_HOST`.
+The `WORKSPACE_SECRET` will be used to sign workspace urls for accessing a container.
+If you already have a `DOJO_HOST` (for example, a publicly accessible IP address), you can use that; otherwise, if you're running multiple nodes on the same host, this IP address (assigned by Docker) will be the `DOJO_HOST`. However, in all cases the `WORKSPACE_HOST` **must be on a separate IP or domain/subdomain** due to NGINX routing.
 The important detail is that the `DOJO_HOST` must be reachable by the workspace node.
 
 ### Set Up a Workspace Node
 
-You may run a workspace node on the same host as the main node, or on a different host; all that matters is that the workspace node can reach the main node.
+You may run a workspace node on the same host as the main node, or on a different host.
+If you choose to run multiple nodes on the same host you will need a reverse proxy to route the domains (ex `example.com` `1.workspace.example.com`) to the correct containers.
 If you do decide to run the workspace node on a different host, make sure to refer to the standard deployment instructions above for how to build the dojo image and configure the host environment.
 
-In order to run a workspace node container, use the `WORKSPACE_KEY` and `DOJO_HOST` obtained from the main node (and `WORKSPACE_NODE` id if you have multiple workspace nodes):
+In order to run a workspace node container, use the `WORKSPACE_KEY`, `WORKSPACE_SECRET`, and `DOJO_HOST` obtained from the main node; set a new unique `WORKSPACE_HOST`; and `WORKSPACE_NODE` id if you have multiple workspace nodes:
 
 ```sh
-WORKSPACE_NODE=1    # The node id for this workspace node
-WORKSPACE_KEY=...   # Replace with the WORKSPACE_KEY
-DOJO_HOST=...       # Replace with the DOJO_HOST
+WORKSPACE_NODE=1     # The node id for this workspace node
+WORKSPACE_KEY=...    # Replace with the WORKSPACE_KEY
+WORKSPACE_SECRET=... # Replace with the WORKSPACE_SECRET
+DOJO_HOST=...        # Replace with the DOJO_HOST
+WORKSPACE_HOST=...   # Replace with a unique WORKSPACE_HOST
 
 DOJO_PATH="./dojo"
 DATA_PATH="/tmp/dojo-data-workspace"
@@ -156,7 +164,9 @@ docker run \
     --name dojo-workspace \
     --privileged \
     -e DOJO_HOST=$DOJO_HOST \
+    -e WORKSPACE_HOST=$WORKSPACE_HOST \
     -e WORKSPACE_KEY=$WORKSPACE_KEY \
+    -e WORKSPACE_SECRET=$WORKSPACE_SECRET \
     -e WORKSPACE_NODE=$WORKSPACE_NODE \
     -v "${DOJO_PATH}:/opt/pwn.college" \
     -v "${DATA_PATH}:/data" \
@@ -196,7 +206,7 @@ docker exec -it dojo-main bash
 NODE_ID=1     # Replace with the node id
 NODE_KEY=...  # The NODE_KEY for the workspace node
 dojo node add $NODE_ID $NODE_KEY
-dojo compose restart --no-deps ctfd
+dojo compose restart --no-deps site
 ```
 
 After a short delay, you should be able to reach the workspace node from the main node:
@@ -232,4 +242,4 @@ Error response from daemon: path /run/homefs is mounted on /run/homefs but it is
 
   `-v /host/path:/data:shared`
 
-- If problem persists: rebuild the outer docker container
+- If the problem persists: rebuild the outer docker container

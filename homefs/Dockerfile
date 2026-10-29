@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 RUN apt-get update && \
     apt-get install -y \
@@ -13,7 +13,7 @@ RUN apt-get update && \
 WORKDIR /opt/homefs
 COPY . .
 
-EXPOSE 80
+EXPOSE 4201
 CMD ["gunicorn", \
      "homefs:create_app()", \
      "--bind=unix:/run/docker/plugins/homefs.sock", \

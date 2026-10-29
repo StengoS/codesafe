@@ -1,66 +1,189 @@
 { pkgs }:
 
 let
-  pythonEnv = pkgs.python3.withPackages (ps: with ps; [
-    asteval
-    flask
-    ipython
-    jupyter
-    psutil
-    pwntools
-    pycryptodome
-    pyroute2
-    r2pipe
-    requests
-    ropper
-    scapy
-    selenium
+  bata24-gef = import ./bata24-gef.nix { inherit pkgs; };
+  burpsuite = import ./burpsuite.nix { inherit pkgs; };
+  devdocs = import ./devdocs { inherit pkgs; };
+  ghidra = import ./ghidra.nix { inherit pkgs; };
+  ida-free = import ./ida-free.nix { inherit pkgs; };
+  llm-tools = import ./llm-tools.nix { inherit pkgs; };
+  wireshark = import ./wireshark.nix { inherit pkgs; };
 
-    ruff
-  ]);
+  pythonPackages =
+    ps:
+    (with ps; [
+      angr
+      asteval
+      flask
+      ipython
+      jupyter
+      pillow
+      psutil
+      pwntools
+      pycryptodome
+      pyroute2
+      r2pipe
+      requests
+      ropper
+      scapy
+      selenium
+    ])
+    ++ ps.angr.optional-dependencies.angrdb
+    ++ ps.angr.optional-dependencies.unicorn;
+
+  pythonEnv = pkgs.python3.withPackages pythonPackages;
+
+  tools = with pkgs; {
+    build = [
+      (lib.hiPrio gcc)
+      (lib.lowPrio clang)
+      clang-tools
+      cmake
+      gnumake
+      nasm
+      qemu
+      rustup
+    ];
+
+    cli-tools = [
+      atuin
+      bat
+      delta
+      hexyl
+      hyperfine
+      navi
+      sd
+      zoxide
+    ];
+
+    compress = [
+      gnutar
+      gzip
+      unzip
+      zip
+    ];
+
+    debug = [
+      bata24-gef
+      gdb
+      gef
+      ltrace
+      pwndbg
+      strace
+    ];
+
+    documentation = [
+      man-pages
+      man-pages-posix
+      devdocs
+    ];
+
+    editor = [
+      emacs
+      gedit
+      nano
+      neovim
+      vim
+      zed-editor.remote_server
+    ];
+
+    exploit = [
+      aflplusplus
+      rappel
+      ropgadget
+      sage
+    ];
+
+    fetch = [ fastfetch ];
+
+    finder = [
+      broot
+      dust
+      eza
+      fd
+      fzf
+      ripgrep
+      ripgrep-all
+    ];
+
+    lsp = [
+      ruff
+      ty
+    ];
+
+    network = [
+      burpsuite
+      netcat-openbsd
+      nmap
+      tcpdump
+      termshark
+      tshark
+      wireshark
+    ];
+
+    reverse = [
+      angr-management
+      binaryninja-free
+      cutter
+      file
+      ghidra
+      ida-free
+      radare2
+    ];
+
+    shells = [
+      fish
+      nushell
+      oh-my-zsh
+      starship
+      zsh
+    ];
+
+    system = [
+      bottom
+      firejail
+      htop
+      landrun
+      ncdu
+      nftables
+      rsync
+    ];
+
+    terminal = [
+      kitty.terminfo
+      screen
+      tmux
+      zellij
+    ];
+
+    web = [
+      firefox
+      geckodriver
+    ];
+  };
 
 in
 {
-  packages = with pkgs; [
-    (lib.hiPrio pythonEnv)
-
-    gcc
-    gnumake
-
-    qemu
-
-    strace
-    gdb
-    pwndbg
-    gef
-    openssh
-    netcat-openbsd
-
-    vim
-    emacs
-
-    ghidra
-    ida-free
-    radare2
-    # TODO: angr-management
-    # TODO: binary-ninja
-
-    wireshark
-    termshark
-    nmap
-    tcpdump
-    nftables
-    firefox
-    geckodriver
-    burpsuite
-
-    aflplusplus
-    rappel
-    ropgadget
-    # TODO: rp++
-
-    sage
-
-    # TODO: apt-tools
-  ];
+  packages =
+    with pkgs;
+    [
+      (lib.hiPrio pythonEnv)
+      llm-tools
+    ]
+    ++ tools.build
+    ++ tools.cli-tools
+    ++ tools.compress
+    ++ tools.debug
+    ++ tools.documentation
+    ++ tools.editor
+    ++ tools.exploit
+    ++ tools.fetch
+    ++ tools.finder
+    ++ tools.lsp
+    ++ tools.network
+    ++ tools.reverse
+    ++ tools.shells
+    ++ tools.system
+    ++ tools.terminal
+    ++ tools.web;
 }

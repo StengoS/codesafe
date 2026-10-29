@@ -1,0 +1,15 @@
+marshmallow_sqlalchemy
+docker
+psycopg2-binary
+pytest
+pytest-dependency
+pytest-order
+pytest-timeout
+pytest-github-actions-annotate-failures
+redis
+pyyaml
+requests
+selenium
+textual
+itsdangerous
+flask_sqlalchemy

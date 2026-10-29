@@ -25,21 +25,31 @@ import docker.errors
 # - container.attach_socket(params=dict(stdin=1, stream=1))
 # - container.put_archive(directory, tarbar)
 
-MAC_HOSTNAME = os.environ.get("MAC_HOSTNAME", "morholt")
-MAC_USERNAME = os.environ.get("MAC_USERNAME", "adamd")
-MAC_KEY_FILE = os.environ.get("MAC_KEY_FILE", "/opt/pwn.college/data/mac-key")
-MAC_GUEST_CONTROL_FILE = os.environ.get("MAC_GUEST_CONTROL_FILE", "guest-control.py")
-MAC_TIMEOUT_SECONDS = os.environ.get("MAC_TIMEOUT_SECONDS", 60*60*4)
+MAC_GUEST_CONTROL_FILE = "MACOSVM=/usr/local/bin/macosvm /usr/bin/python3 ./mac-host/guest-control.py"
+MAC_TIMEOUT_SECONDS = 60 * 60 * 4
+
+# ssh hands the command string to the remote login shell, so every argument must be
+# quoted; MAC_GUEST_CONTROL_FILE is shell syntax (an env-assignment prefix) and must not be.
+def guest_control_command(*args):
+    return f"{MAC_GUEST_CONTROL_FILE} {shlex.join(args)}"
+
 
 class MacDockerClient:
-    def __init__(self, hostname=None, username=None, key_filename=None, guest_key_file=None):
-        self.hostname = hostname or MAC_HOSTNAME
-        self.username = username or MAC_USERNAME
-        self.key_filename = key_filename or MAC_KEY_FILE  # Path to the SSH key for 'fluffy'
+    def __init__(self, hostname, username, key_path):
+        self.hostname = hostname
+        self.username = username
+        self.key_path = key_path
 
         self.containers = MacContainerCollection(self)
         self.images = MacImageCollection(self)
         self.networks = MacNetworkCollection(self)
+        self.volumes = MacVolumeCollection(self)
+
+        # this insanity is required b/c of some high level code
+        class MyAPIThing:
+            def __init__(self):
+                self.base_url = "localhost"
+        self.api = MyAPIThing()
 
     def close(self):
         pass  # No persistent connection to close
@@ -52,8 +62,8 @@ class MacDockerClient:
                        "-o", "ControlMaster=no",
                        "-o", "LogLevel=ERROR",
                        ]
-        if self.key_filename:
-            ssh_command.extend(['-i', self.key_filename])
+        if self.key_path:
+            ssh_command.extend(['-i', self.key_path])
         if self.username:
             ssh_command.append(f'{self.username}@{self.hostname}')
         else:
@@ -67,15 +77,33 @@ class MacDockerClient:
         else:
             stdout_loc = None
             stderr_loc = None
-            
-        result = subprocess.run(ssh_command, stdout=stdout_loc, stderr=stderr_loc, input=input, timeout=timeout_seconds)
+
+        try:
+            result = subprocess.run(ssh_command, stdout=stdout_loc, stderr=stderr_loc, input=input, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as e:
+            if exception_on_fail:
+                raise e
+            else:
+                return -1, b""
+
         if result.returncode != 0:
             if exception_on_fail:
                 error_msg = result.stdout.strip()
-                raise Exception(f'SSH {ssh_command=} {self.username=} {self.key_filename=} {self.hostname=} {result=} {result.returncode=} failed: {error_msg}')
+                raise Exception(f'SSH {ssh_command=} {self.username=} {self.key_path=} {self.hostname=} {result=} {result.returncode=} failed: {error_msg}')
         return result.returncode, result.stdout.strip() if result.stdout else b""
-    
 
+
+
+class MockDetachedContainer:
+    """Mock container for detach=True mode compatibility"""
+    def wait(self):
+        pass
+
+    def logs(self):
+        return b""
+
+    def remove(self):
+        pass
 
 class MacContainerCollection:
     def __init__(self, client):
@@ -83,7 +111,9 @@ class MacContainerCollection:
 
     def get(self, name):
         # Run 'guest-control.py list-vms' and parse the output
-        exitcode, output = self.client._ssh_exec(f'{MAC_GUEST_CONTROL_FILE} list-vms', input=b"")
+        exitcode, output = self.client._ssh_exec(guest_control_command("list-vms"), input=b"", exception_on_fail=False, timeout_seconds=10)
+        if exitcode != 0:
+            raise docker.errors.NotFound(f'Container {name} not found')
         output = output.decode('latin-1')
         vms = self.parse_list_vms(output)
         for vm in vms:
@@ -97,21 +127,21 @@ class MacContainerCollection:
         # Create a VM with the given parameters
         assert image.startswith("mac:")
         image = image.split("mac:", maxsplit=1)[-1]
-        command = f'{MAC_GUEST_CONTROL_FILE} create-vm {image}'
+        args = ["create-vm", image]
         if name:
-            command += f' --id {name}'
-        exitcode, output = self.client._ssh_exec(command, input=b"")
+            args += ["--id", name]
+        exitcode, output = self.client._ssh_exec(guest_control_command(*args), input=b"")
         output = output.decode('latin-1')
         # not sure if the following actually parses
         if 'Started' in output:
             unique_id = output.strip().split(' ')[1]
             # Status is always running after create
             vm = {'id': unique_id, 'status': 'running'}
-            time.sleep(1)
             # set up the timeout
             container = MacContainer(self.client, vm)
-            # disable and do on the image now
-            # container.exec_run(f"nohup bash -c 'sleep {MAC_TIMEOUT_SECONDS} && echo \"VM and all files going away in 5 minutes, better save now\" | wall && sleep 300 && echo \"VM and all files going away in 1 minute, last warning\" | wall && sleep 60 && shutdown -h now' > /dev/null &", user="0")
+            # we want to setup the hostname if it exists
+            if hostname:
+                container.exec_run("cat - > /Users/admin/hostname", input=hostname.encode())
             return container
         else:
             raise Exception(f'Error creating container: {image=} {name=} {output}')
@@ -129,12 +159,35 @@ class MacContainerCollection:
             vms.append(vm_info)
         return vms
 
+    # ------------------------------------------------------------------
+    # NEW: stub implementation of Docker SDK-style `.run`
+    # ------------------------------------------------------------------
+    # docker-py exposes `run(image, command=None, **kwargs)` on
+    # `ContainerCollection`, providing the familiar `docker run` behaviour. :contentReference[oaicite:0]{index=0}
+    # It normally returns the container’s logs (bytes) unless `detach=True`,
+    # in which case it yields a `Container` object. :contentReference[oaicite:1]{index=1}
+    # For our mac-backed shim we only need interface compatibility, so we
+    # accept the same parameters and immediately return an empty byte string. :contentReference[oaicite:2]{index=2}
+    def run(self, image, command=None, **kwargs):
+        if kwargs.get('detach', False):
+            return MockDetachedContainer()
+        return b""
+
 class MacContainer:
     def __init__(self, client, vm_info):
         self.client = client
         self.id = vm_info['id']
         self.vm_info = vm_info
         self.status = vm_info.get("status", "creating")
+        self.attrs = {}
+
+    def logs(self, stream, follow):
+        # Very hacky thing, just return the other hacky thing that we did
+        return self.attach(stream)
+
+    def attach(self, stream):
+        # Super hacky thing, this just needs to return [b"Initialized.\n"]
+        return [b"Initialized.\n", b"Ready.\n"]
 
     def remove(self, force=True):
         # Kill the VM
@@ -142,14 +195,14 @@ class MacContainer:
         # first try to shutdown the VM
         timeout_hit = False
         try:
-            self.exec_run("/sbin/shutdown -h now", "0", timeout_seconds=10, input=b"")
+            self.exec_run("/sbin/shutdown -h now", "0", timeout_seconds=8, input=b"")
         except subprocess.TimeoutExpired:
             # if that didn't work, kill it
             timeout_hit = True
 
         if force or timeout_hit:
-            command = f'{MAC_GUEST_CONTROL_FILE} kill-vm {self.id}'
-            exitcode, output = self.client._ssh_exec(command, exception_on_fail=False, input=b"")
+            command = guest_control_command("kill-vm", self.id)
+            exitcode, output = self.client._ssh_exec(command, exception_on_fail=False, input=b"", timeout_seconds=5)
 
     def wait(self, condition='removed'):
         # Wait until the VM is removed
@@ -177,8 +230,8 @@ class MacContainer:
         elif user == "1000":
             # they want to run the command as hacker
             cmd = f"exec sudo su - hacker -c {shlex.quote(cmd)}"
-        tty_arg = '--tty' if use_tty else ''
-        command = f"{MAC_GUEST_CONTROL_FILE} exec {tty_arg} {self.id} {shlex.quote(cmd)}"
+        tty_args = ["--tty"] if use_tty else []
+        command = guest_control_command("exec", *tty_args, self.id, cmd)
         exitcode, output = self.client._ssh_exec(command, only_stdout=False, exception_on_fail=False, input=input, capture_output=capture_output, timeout_seconds=timeout_seconds)
         return exitcode, output
 
@@ -191,11 +244,11 @@ class MacContainer:
         elif user == "1000":
             # they want to run the command as hacker
             cmd = f"exec sudo su - hacker -c {shlex.quote(cmd)}"
-        tty_arg = '--tty' if use_tty else ''
-        command = f"{MAC_GUEST_CONTROL_FILE} exec {tty_arg} {self.id} {shlex.quote(cmd)}"
+        tty_args = ["--tty"] if use_tty else []
+        command = guest_control_command("exec", *tty_args, self.id, cmd)
         to_exec = [
             "ssh",
-            "-i", self.client.key_filename,
+            "-i", self.client.key_path,
             "-a", # prevent any SSH agent forward crazyness
             "-o", "StrictHostKeychecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -215,13 +268,13 @@ class MacContainer:
     def send_flag(self, flag):
         flag = flag.strip()
         flag = flag.decode('latin-1')
-        self.exec_run(f"echo '{flag}' | sudo tee /flag", input=b"")
+        self.exec_run(f"printf '%s\\n' {shlex.quote(flag)} | sudo tee /flag", input=b"")
 
     def attach_socket(self, params=None):
         class MySendall:
             def __init__(self, container):
                 self.sendall = lambda flag: container.send_flag(flag)
-                
+
         class MySock:
             def __init__(self, container):
                 self._sock = MySendall(container)
@@ -237,8 +290,8 @@ class MacContainer:
         if exitcode != 0:
             raise docker.errors.NotFound(f'Getting archive {path=} failed {exitcode=} {output=}')
         return output
-        
-    
+
+
 
 class MacImageCollection:
     def __init__(self, client):
@@ -249,9 +302,9 @@ class MacImageCollection:
         if not image_name.startswith("mac:"):
             raise docker.errors.NotFound(f'Image {image_name} is not compatible')
         image_name = image_name.split("mac:", maxsplit=1)[-1]
-        command = f"{MAC_GUEST_CONTROL_FILE} images {image_name}"
+        command = guest_control_command("images", image_name)
         try:
-            exitcode, output = self.client._ssh_exec(command, input=b"")
+            exitcode, output = self.client._ssh_exec(command, input=b"", timeout_seconds=10)
         except Exception as e:
             raise docker.errors.NotFound(f'Image {image_name} not found: {e}')
 
@@ -283,4 +336,23 @@ class MacNetwork:
 
     def disconnect(self, container):
         # Simulate network disconnection
+        pass
+
+
+
+class MacVolumeCollection:
+    def __init__(self, client):
+        self.client = client
+
+    def get(self, volume_name):
+        # Simulate volume operations
+        return MacVolume(volume_name)
+
+
+class MacVolume:
+    def __init__(self, name):
+        self.name = name
+
+    def remove(self):
+        # Simulate volume removal
         pass

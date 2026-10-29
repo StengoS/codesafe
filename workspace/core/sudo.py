@@ -12,11 +12,12 @@ def error(message):
 
 
 def main():
-    program = os.path.basename(sys.argv[0])
+    program = "sudo"
 
-    parser = argparse.ArgumentParser(description="execute a command as another user")
+    parser = argparse.ArgumentParser(prog=program, description="execute a command as another user")
     parser.add_argument("-u", "--user", help="run command as specified user", default="0")
-    parser.add_argument("command", nargs=argparse.REMAINDER, help="command to execute")
+    parser.add_argument("command", help="command to execute")
+    parser.add_argument("args", nargs=argparse.REMAINDER, help="arguments for command")
 
     args = parser.parse_args()
 
@@ -30,7 +31,7 @@ def main():
     else:
         error(f"{program}: unknown user: {args.user}")
 
-    groups = [group.gr_id for group in grp.getgrall() if user.pw_name in group.gr_mem]
+    groups = [group.gr_gid for group in grp.getgrall() if user.pw_name in group.gr_mem]
     if user.pw_gid not in groups:
         groups.append(user.pw_gid)
 
@@ -42,18 +43,14 @@ def main():
     os.environ["USER"] = user.pw_name
     os.environ["SHELL"] = user.pw_shell
 
-    if not args.command:
-        parser.print_help()
-        sys.exit(1)
-
-    command_path = shutil.which(args.command[0])
+    command_path = shutil.which(args.command)
     if not command_path:
-        error(f"{program}: {args.command[0]}: command not found")
+        error(f"{program}: {args.command}: command not found")
 
     try:
-        os.execve(command_path, args.command, os.environ)
+        os.execve(command_path, [args.command, *args.args], os.environ)
     except:
-        os.exit(1)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

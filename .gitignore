@@ -3,6 +3,7 @@
 opt/
 sensai/
 data/
+cache/
 
 # Custom
 *.prompt
