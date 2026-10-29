@@ -209,7 +209,8 @@
 {% set service_icons = {"terminal": "fa-terminal", "code": "fa-code", "desktop": "fa-desktop", "ssh": "fa-key", "lecture": "fa-video"} %}
 <div class="workspace-controls" data-popout="{{ 'true' if popout else 'false' }}">
   <div id="workspace-notification-banner"></div>
-  {% for service in challenge.interfaces %}
+  {# Codesafe: hide desktop services for now since they are not used currently for Codesafe purposes. #}
+  {% for service in challenge.interfaces if not (service.name | lower).startswith("desktop") %}
   {% set service_key = service.name | lower %}
   <button class="workspace-control workspace-service btn btn-md btn-outline-secondary"
       data-service="{{ service_key }}: {{ service.port }}"
