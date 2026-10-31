@@ -54,7 +54,7 @@ $ docker exec dojo dojo logs
 
 Once the build is complete, you can access Codesafe locally at http://localhost.codesafe-cyber.com. 
 
-***Note**: In development mode (the default), the site is served over plain HTTP only, so use `http://` rather than `https://`. If you're hosting the instance on a remote machine, forward its ports to your own with an SSH tunnel (e.g., `ssh -N -L 80:localhost:80 -L 4040:localhost:4040 <user>@<host>`) and keep the `/etc/hosts` entry on your own machine.* 
+***Note**: In development mode (the default), the site is served over plain HTTP only, so use `http://` rather than `https://`. If you're hosting the instance on a remote machine, forward its ports to your own with an SSH tunnel (e.g., `ssh -N -L 80:localhost:80 -L 4040:localhost:4040 <user>@<host>`) and keep the `/etc/hosts` entry on your own machine. Local port 80 is required (workspace links don't include a port), and binding it needs root on macOS, so run the tunnel with `sudo ssh -F "$HOME/.ssh/config" -o UserKnownHostsFile="$HOME/.ssh/known_hosts" ...` (plus `-o IdentityAgent=...` if your SSH config uses an agent like 1Password's).* 
 
 
 ### Current Set-Up
