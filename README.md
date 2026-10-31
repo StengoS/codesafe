@@ -27,7 +27,21 @@ $ git clone https://github.com/StengoS/codesafe.git
 $ cd codesafe/
 $ docker build -t pwncollege/dojo "."
 $ modprobe br_netfilter
-$ docker run --name dojo --privileged -v ".:/opt/pwn.college" -v "./data:/data" -p 4040:4040 -p 80:80 -p 443:443 -d pwncollege/dojo
+$ docker run --name dojo --privileged -v ".:/opt/pwn.college" -v "./data:/data" \
+    -e DOJO_HOST=localhost.codesafe-cyber.com -e WORKSPACE_HOST=workspace.localhost.codesafe-cyber.com \
+    -p 4040:4040 -p 80:80 -p 443:443 -d pwncollege/dojo
+```
+
+For local testing, Codesafe is served at `localhost.codesafe-cyber.com`. That name has no public DNS, so point it (and its workspace subdomain) at your machine by adding this line to `/etc/hosts`:
+
+```
+127.0.0.1 localhost.codesafe-cyber.com workspace.localhost.codesafe-cyber.com future.localhost.codesafe-cyber.com
+```
+
+On macOS/Linux, you can do so with:
+
+```
+$ echo "127.0.0.1 localhost.codesafe-cyber.com workspace.localhost.codesafe-cyber.com future.localhost.codesafe-cyber.com" | sudo tee -a /etc/hosts
 ```
 
 ***Note**: The usages of pwn.college around the repo and website are remaining artifacts, also considering that we are building Codesafe by extending pwn.college’s behind-the-scenes DOJO infrastructure. We will, at some point, adjust the naming scheme when appropriate.*
@@ -38,9 +52,9 @@ You will most likely need to wait for the Docker build and run commands to finis
 $ docker exec dojo dojo logs
 ```
 
-Once the build is complete, you can access Codesafe locally at localhost.pwn.college. 
+Once the build is complete, you can access Codesafe locally at http://localhost.codesafe-cyber.com. 
 
-***Note**: Because the infrastructure uses a self-signed certificate, if you are on Firefox, the browser may not allow you to access the site (without even an option to ignore the warning). You may need to use an alternative browser, e.g., Chrome, to access the site.* 
+***Note**: In development mode (the default), the site is served over plain HTTP only, so use `http://` rather than `https://`. If you're hosting the instance on a remote machine, forward its ports to your own with an SSH tunnel (e.g., `ssh -N -L 80:localhost:80 -L 4040:localhost:4040 <user>@<host>`) and keep the `/etc/hosts` entry on your own machine.* 
 
 
 ### Current Set-Up
