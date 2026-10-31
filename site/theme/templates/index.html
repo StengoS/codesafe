@@ -30,7 +30,6 @@
   <p><br><br>
 
   <h2>Recent Updates</h2>
-  <h3>2025-05-28</h3>
   <p>The challenges, platform, and even infrastructure behind Codesafe is always changing and evolving! Please note that at this time, Codesafe is not considered to be a 
 		stable live service. With regards to registration, this means that your challenge progress may NOT be saved and your accounts could be
 		wiped (especially for our first few field tests as we create a stable process).</p>
@@ -41,7 +40,8 @@
 
   <h2>Available Modules</h2>
 
-  {{ dojo_grid(categorized_dojos["course"], dojo_container_counts) }}
+  {# Show every viewable dojo here, since the navbar no longer links to the /dojos listing. #}
+  {{ dojo_grid(categorized_dojos["welcome"] + categorized_dojos["topic"] + categorized_dojos["public"] + categorized_dojos["course"], dojo_container_counts) }}
 
   {% if categorized_dojos["member"] %}
   <p><br><br>

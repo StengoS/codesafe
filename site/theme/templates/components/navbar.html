@@ -16,12 +16,13 @@
     <div class="collapse navbar-collapse" id="base-navbars">
       <div class="d-none d-md-block" style="border-left: 2px solid white; height: 20px; margin: 0 20px;"></div>
       <ul class="navbar-nav mr-auto">
-        {{ navitem("Dojos", url_for("pwncollege_dojos.listing"), "fa-torii-gate") }}
         {{ navitem("Workspace", url_for("pwncollege_workspace.view_workspace"), "fa-desktop") }}
         {# Commenting out these navbar items for now since they are not used currently for Codesafe purposes. #}
+        {# Dojos are listed on the homepage instead. #}
+        {# {{ navitem("Dojos", url_for("pwncollege_dojos.listing"), "fa-torii-gate") }} #}
         {# {{ navitem("Help", url_for("pwncollege_sensai.view_sensai"), "fa-question", new=True) }} #}
         {# {{ navitem("Chat", "https://discord.gg/pwncollege", "fa-comments", new=True) }} #}
-        {{ navitem("Search", "#", "fa-search") }}
+        {# {{ navitem("Search", "#", "fa-search") }} #}
       </ul>
       <hr class="d-sm-flex d-md-flex d-lg-none">
       <ul class="navbar-nav ml-md-auto d-block d-sm-flex d-md-flex">
