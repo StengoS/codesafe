@@ -5,8 +5,9 @@ on:
   push:
     branches:
       - master
-  schedule:
-    - cron: "42 06 * * *"
+  # Codesafe: nightly schedule disabled (runs upstream's full suite and Docker Hub upload).
+  # schedule:
+  #   - cron: "42 06 * * *"
 jobs:
   test:
     name: "${{ matrix.mode }} ${{ matrix.tier }} Tests"
